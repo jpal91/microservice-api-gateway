@@ -1,0 +1,13 @@
+{
+  "extends": "@tsconfig/node22/tsconfig.json",
+  "compilerOptions": {
+    "types": ["jest"],
+    "baseUrl": ".",
+    "paths": {
+      "@app/*": ["src/*"],
+      "@tests/*": ["tests/*"]
+    }
+  },
+  "include": ["src/**/*", "tests/**/*", "benchmarks/**/*"],
+  "exclude": ["node_modules"]
+}
