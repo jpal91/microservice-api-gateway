@@ -4,7 +4,6 @@ import axios, {
   type AxiosResponseHeaders,
   type RawAxiosResponseHeaders,
 } from "axios";
-import { RawAxiosRequestHeaders } from "axios";
 import { Request, Response } from "express";
 import type {
   ApiResponse,
@@ -15,6 +14,7 @@ import type {
   ErrorCodes,
 } from "microservice-ecommerce";
 import RetryStrategy, { type RetryStrategyOptions } from "./retry";
+import { RoundRobinBalancer, RandomBalancer } from "./load-balancer";
 
 interface ProxyResponse {
   data: ApiResponse;
@@ -30,7 +30,7 @@ interface RegistryHeaders {
 
 interface ApiGatewayOpts {
   registryUrl?: string | URL;
-  loadBalancerStrategy?: "round-robin" | "random" | "least-connections";
+  loadBalancerStrategy?: "round-robin" | "random";
   logger?: Logger;
   retryStrategy?: RetryStrategyOptions;
 }
@@ -56,15 +56,23 @@ class ApiGateway {
   client: AxiosStatic = axios;
   registryHeaders: RegistryHeaders | undefined;
   log: Logger;
-  lbStrategy: ApiGatewayOpts["loadBalancerStrategy"];
+  loadBalancer: RoundRobinBalancer | RandomBalancer;
 
   constructor(port: number, opts?: ApiGatewayOpts) {
     this.registryUrl =
       String(opts?.registryUrl) ??
       process.env.REGISTRY_URL ??
       "http://localhost:3002";
-    this.lbStrategy = opts?.loadBalancerStrategy ?? "round-robin";
     this.log = opts?.logger ?? console;
+
+    switch (opts?.loadBalancerStrategy ?? "random") {
+      case "round-robin":
+        this.loadBalancer = new RoundRobinBalancer();
+        break;
+      default:
+        this.loadBalancer = new RandomBalancer();
+        break;
+    }
 
     this.retryStrategy = new RetryStrategy(opts?.retryStrategy);
 
@@ -118,8 +126,7 @@ class ApiGateway {
       const [serviceName, ...remaining] = req.path.split("/").filter(Boolean);
       const instances = await this.getServices(serviceName);
 
-      // TODO: load balancer
-      const service = instances[0];
+      const service = this.loadBalancer.selectInstance(instances);
       const targetUrl = `https://${service.host}:${service.port}/${remaining.join("/")}`;
 
       this.log.debug(
@@ -129,16 +136,9 @@ class ApiGateway {
         targetUrl,
       );
 
-      const { data, status, headers } = await axios.request<ApiResponse>({
-        method: req.method,
-        url: targetUrl,
-        headers: req.headers,
-        data: req.body,
-      });
-
-      this.handleSuccessResponse(res, status, data, headers);
+      return this.handleServiceRequest(req, res, targetUrl);
     } catch (e) {
-      this.handleErrResponse(res, e);
+      return this.handleErrResponse(res, e);
     }
   }
 
