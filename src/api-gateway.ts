@@ -58,7 +58,7 @@ class ApiGateway {
   log: Logger;
   loadBalancer: RoundRobinBalancer | RandomBalancer;
 
-  constructor(port: number, opts?: ApiGatewayOpts) {
+  constructor(port: string | number, opts?: ApiGatewayOpts) {
     this.registryUrl =
       String(opts?.registryUrl) ??
       process.env.REGISTRY_URL ??
@@ -76,7 +76,7 @@ class ApiGateway {
 
     this.retryStrategy = new RetryStrategy(opts?.retryStrategy);
 
-    this.register(port);
+    this.register(Number(port));
     this.log.info("Starting api gateway");
   }
 
@@ -111,7 +111,12 @@ class ApiGateway {
     this.log.debug("Api Gateway Registered");
   }
 
-  async handleRequest(req: Request, res: Response) {
+  async handleRequest(
+    req: Request,
+    res: Response,
+    serviceName: string,
+    remaining: string,
+  ) {
     try {
       // Gateway hasn't finished registering yet
       if (!this.isReady) {
@@ -122,12 +127,10 @@ class ApiGateway {
         );
       }
 
-      // First part of the path should indicate the service name requested
-      const [serviceName, ...remaining] = req.path.split("/").filter(Boolean);
       const instances = await this.getServices(serviceName);
 
       const service = this.loadBalancer.selectInstance(instances);
-      const targetUrl = `https://${service.host}:${service.port}/${remaining.join("/")}`;
+      const targetUrl = `https://${service.host}:${service.port}/${remaining}`;
 
       this.log.debug(
         "Service request - Name: ",
@@ -277,3 +280,5 @@ class ApiGateway {
     res.status(status).json(response);
   }
 }
+
+export default ApiGateway;
