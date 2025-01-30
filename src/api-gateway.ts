@@ -92,14 +92,16 @@ class ApiGateway {
     }
 
     this.log.debug("Obtaining initial registration");
+
+    const url = new URL("/service", this.registryUrl);
+
     const { data } = await axios.post<RegistrationResponse>(
-      "/service",
+      url.toString(),
       {
         port,
         serviceType: "api-gateway",
       },
       {
-        baseURL: this.registryUrl,
         headers: {
           Authorization: `Bearer ${process.env.SERVICE_REGISTRATION_KEY}`,
         },
