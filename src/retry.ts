@@ -12,15 +12,13 @@ class RetryStrategy {
   maxRetries: number;
   baseDelay: number;
   maxDelay: number;
-  retryableStatus: Set<number>;
+  private _retryableStatus: Set<number> = new Set([500, 502, 503, 504]);
 
   constructor(opts?: RetryStrategyOptions) {
     this.maxRetries = opts?.maxRetries ?? 3;
     this.baseDelay = opts?.baseDelay ?? 1000;
     this.maxDelay = opts?.maxDelay ?? 5000;
-    this.retryableStatus = opts?.retryableStatus
-      ? new Set(opts.retryableStatus)
-      : new Set([500, 502, 503, 504]);
+    opts?.retryableStatus && (this.retryableStatus = opts.retryableStatus);
   }
 
   /**
@@ -61,6 +59,14 @@ class RetryStrategy {
     await new Promise((resolve) => {
       setTimeout(resolve, exponentialDelay + jitter);
     });
+  }
+
+  get retryableStatus(): Set<number> {
+    return this._retryableStatus;
+  }
+
+  set retryableStatus(statuses: number[]) {
+    this._retryableStatus = new Set(statuses);
   }
 }
 
