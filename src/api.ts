@@ -3,7 +3,7 @@ import middleware from "./middleware";
 import type ApiGateway from "./api-gateway";
 import type { ApiResponse } from "microservice-ecommerce";
 
-const SERVICES = ["products", "orders", "cart", "users"];
+export const SERVICES = ["products", "orders", "cart", "users"];
 
 const createApi = (gateway: ApiGateway) => {
   const app = express();
