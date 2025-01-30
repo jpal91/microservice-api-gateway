@@ -1,38 +1,28 @@
-import express, { type Request, type Response } from "express";
-import middleware from "./middleware";
+import createApi from "./api";
 import ApiGateway from "./api-gateway";
-import type { ApiResponse } from "microservice-ecommerce";
+import pino from "pino";
 
-const SERVICES = ["products", "orders", "cart", "users"];
+const logger = pino({
+  level: process.env.LOG_LEVEL || "info",
+  transport: {
+    target: "pino-pretty",
+  },
+});
 
 const port = process.env.PORT || 3001;
-const app = express();
-const router = express.Router();
+const gateway = new ApiGateway(port, { logger });
+const app = createApi(gateway);
 
-app.use(router);
-app.use(...middleware);
+const server = app.listen(port, () => {
+  logger.info(`Api Gateway listening on port ${port}`);
+});
 
-const gateway = new ApiGateway(port);
-
-SERVICES.forEach((service) => {
-  router.all(`/${service}/*`, async (req: Request, res: Response) => {
-    const rest = req.params[0] ?? "";
-    await gateway.handleRequest(req, res, service, rest);
+const shutdown = () => {
+  logger.debug("Closing server");
+  server.close(() => {
+    logger.debug("Api Gateway Closed");
   });
-});
+};
 
-router.all("/*", (req: Request, res: Response) => {
-  const response: ApiResponse = {
-    success: false,
-    timestamp: Date.now(),
-    error: {
-      code: "SERVICE_NO_EXIST",
-    },
-  };
-
-  res.status(404).json(response);
-});
-
-app.listen(port, async () => {
-  console.info("Api Gateway listening on", port);
-});
+process.on("SIGTERM", () => shutdown());
+process.on("SIGINT", () => shutdown());
