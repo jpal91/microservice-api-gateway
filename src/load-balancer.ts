@@ -14,10 +14,14 @@ export class RoundRobinBalancer {
 
   selectInstance(instances: Instance[]) {
     const type = instances[0].serviceType;
-    const idx = this.serviceTypes.get(type) ?? 0;
+    let idx = this.serviceTypes.get(type) ?? 0;
+
+    if (idx > instances.length - 1) {
+      idx = 0;
+    }
 
     // In case an instance has been marked unhealthy at some point, we clamp
-    const instance = instances[Math.min(idx, instances.length - 1)];
+    const instance = instances[idx];
     this.serviceTypes.set(type, (idx + 1) % instances.length);
 
     return instance;
