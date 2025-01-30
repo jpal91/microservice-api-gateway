@@ -1,4 +1,4 @@
-import type { AxiosError } from "axios";
+import { AxiosError } from "axios";
 
 export interface RetryStrategyOptions {
   maxRetries?: number;
@@ -22,8 +22,18 @@ class RetryStrategy {
       : new Set([500, 502, 503, 504]);
   }
 
-  shouldRetry(err: AxiosError, attempt: number) {
-    if (err.response) {
+  /**
+   * Determines if a request to a service should be retired.
+   *
+   * Technically only AxiosErrors should be called with this. If a different error type is called
+   * it's most likely due to some internal issue in which case we should automatically not retry.
+   * Otherwise if the status indicates a retry may be possible, we try again.
+   *
+   * @param err - Error thrown from the axios request
+   * @param attempt - The number of attempts made on this request
+   */
+  shouldRetry(err: AxiosError | unknown, attempt: number) {
+    if (err instanceof AxiosError && err.response) {
       return (
         attempt < this.maxRetries &&
         this.retryableStatus.has(err.response.status)
@@ -33,6 +43,11 @@ class RetryStrategy {
     }
   }
 
+  /**
+   * Creates an exponential backoff with jitter to slow subsequent request retries
+   *
+   * @param {number} attempt - The number of times the request has been attempted
+   */
   async delay(attempt: number) {
     const exponentialDelay = Math.min(
       this.maxDelay,

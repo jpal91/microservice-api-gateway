@@ -14,6 +14,7 @@ import type {
   ErrorResponse,
   ErrorCodes,
 } from "microservice-ecommerce";
+import RetryStrategy, { type RetryStrategyOptions } from "./retry";
 
 interface ProxyResponse {
   data: ApiResponse;
@@ -31,6 +32,7 @@ interface ApiGatewayOpts {
   registryUrl?: string | URL;
   loadBalancerStrategy?: "round-robin" | "random" | "least-connections";
   logger?: Logger;
+  retryStrategy?: RetryStrategyOptions;
 }
 
 type Headers = { [key: string]: string };
@@ -50,6 +52,7 @@ class ApiGateway {
   private registryUrl: string;
   private isReady = false;
 
+  retryStrategy: RetryStrategy;
   client: AxiosStatic = axios;
   registryHeaders: RegistryHeaders | undefined;
   log: Logger;
@@ -62,6 +65,8 @@ class ApiGateway {
       "http://localhost:3002";
     this.lbStrategy = opts?.loadBalancerStrategy ?? "round-robin";
     this.log = opts?.logger ?? console;
+
+    this.retryStrategy = new RetryStrategy(opts?.retryStrategy);
 
     this.register(port);
     this.log.info("Starting api gateway");
@@ -137,6 +142,31 @@ class ApiGateway {
     }
   }
 
+  async handleServiceRequest(req: Request, res: Response, url: string) {
+    let attempt = 0;
+
+    // Attempts to fufill the request using the configured retry strategy
+    while (true) {
+      try {
+        const { data, status, headers } = await axios.request<ApiResponse>({
+          method: req.method,
+          url,
+          headers: req.headers,
+          data: req.body,
+        });
+
+        return this.handleSuccessResponse(res, status, data, headers);
+      } catch (error) {
+        if (!this.retryStrategy.shouldRetry(error, attempt)) {
+          return this.handleErrResponse(res, error);
+        }
+      }
+
+      attempt++;
+      await this.retryStrategy.delay(attempt);
+    }
+  }
+
   async getServices(serviceType: string) {
     const { data } = await axios.get<ApiResponse<Instance[]>>(
       `/services/${serviceType}`,
@@ -149,7 +179,7 @@ class ApiGateway {
     return data.data as Instance[];
   }
 
-  handleSuccessResponse<T = any, H extends Headers = {}>(
+  handleSuccessResponse<T = any>(
     res: Response,
     status: number,
     data?: T,
