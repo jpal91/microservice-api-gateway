@@ -10,7 +10,8 @@ const logger = pino({
 });
 
 const port = process.env.PORT || 3001;
-const gateway = new ApiGateway(port, { logger });
+const gateway = new ApiGateway({ logger });
+gateway.register(Number(port));
 const app = createApi(gateway);
 
 const server = app.listen(port, () => {

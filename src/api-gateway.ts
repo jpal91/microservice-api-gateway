@@ -37,14 +37,21 @@ interface ApiGatewayOpts {
 
 type Headers = { [key: string]: string };
 
-class ApiGatewayError extends Error {
+export class ApiGatewayError extends Error {
   status: number;
-  code: ErrorCodes;
+  code: ErrorCodes | string;
+  data?: any;
 
-  constructor(status: number, code: ErrorCodes, message?: string) {
+  constructor(
+    status: number,
+    code: ErrorCodes | string,
+    message?: string,
+    data?: any,
+  ) {
     super(message);
     this.status = status;
     this.code = code;
+    this.data = data;
   }
 }
 
@@ -58,7 +65,7 @@ class ApiGateway {
   log: Logger;
   loadBalancer: RoundRobinBalancer | RandomBalancer;
 
-  constructor(port: string | number, opts?: ApiGatewayOpts) {
+  constructor(opts?: ApiGatewayOpts) {
     this.registryUrl =
       String(opts?.registryUrl) ??
       process.env.REGISTRY_URL ??
@@ -76,7 +83,6 @@ class ApiGateway {
 
     this.retryStrategy = new RetryStrategy(opts?.retryStrategy);
 
-    this.register(Number(port));
     this.log.info("Starting api gateway");
   }
 
@@ -158,7 +164,7 @@ class ApiGateway {
           data: req.body,
         });
 
-        return this.handleSuccessResponse(res, status, data, headers);
+        return this.handleSuccessResponse(res, status, data.data, headers);
       } catch (error) {
         if (!this.retryStrategy.shouldRetry(error, attempt)) {
           return this.handleErrResponse(res, error);
@@ -250,12 +256,13 @@ class ApiGateway {
       status = err.status;
       code = err.code;
       message = err.message;
+      data = err.data;
 
       // Unhandled error occured
     } else {
       status = 500;
       code = "UNKNOWN_ERROR";
-      message = err instanceof Error ? err.message : String(err);
+      message = err instanceof Error ? err.message : (err as any);
     }
 
     const response: ApiResponse = {

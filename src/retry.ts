@@ -1,4 +1,5 @@
 import { AxiosError } from "axios";
+import { ApiGatewayError } from "./api-gateway";
 
 export interface RetryStrategyOptions {
   maxRetries?: number;
@@ -38,6 +39,8 @@ class RetryStrategy {
         attempt < this.maxRetries &&
         this.retryableStatus.has(err.response.status)
       );
+    } else if (err instanceof ApiGatewayError) {
+      return attempt < this.maxRetries && this.retryableStatus.has(err.status);
     } else {
       return false;
     }
