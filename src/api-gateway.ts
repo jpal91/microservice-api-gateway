@@ -12,6 +12,7 @@ import type {
   Instance,
   ErrorResponse,
   ErrorCodes,
+  HealthCheckResponse,
 } from "microservice-ecommerce";
 import RetryStrategy, { type RetryStrategyOptions } from "./retry";
 import { RoundRobinBalancer, RandomBalancer } from "./load-balancer";
@@ -32,6 +33,7 @@ interface RegistryHeaders {
 interface ApiGatewayOpts {
   requestTimeout?: number;
   totalRequestTimeout?: number;
+  healthCheckInterval?: number;
   registryUrl?: string | URL;
   loadBalancerStrategy?: "round-robin" | "random";
   logger?: Logger;
@@ -39,6 +41,13 @@ interface ApiGatewayOpts {
 }
 
 type Headers = { [key: string]: string | string[] | undefined };
+
+type ApiGatewayStatus =
+  | "GATEWAY_STARTING"
+  | "REGISTRY_HEALTH_CHECK_FAIL"
+  | "GATEWAY_ACTIVE"
+  | "SHUTTING_DOWN"
+  | "ATTEMPTING_REREGISTRATION";
 
 const EXCLUDED_HEADERS = new Set([
   "host",
@@ -83,9 +92,12 @@ export class ApiGatewayError extends Error {
 
 class ApiGateway {
   private registryUrl: string;
-  private isReady = false;
+  private status: ApiGatewayStatus = "GATEWAY_STARTING";
+  private port: number | undefined;
+  private healthCheckTimeout: NodeJS.Timeout | undefined;
 
   timeout: number;
+  healthCheckInterval: number;
   totalTimeout: number;
   retryStrategy: RetryStrategy;
   client: AxiosStatic = axios;
@@ -101,6 +113,7 @@ class ApiGateway {
     this.log = opts?.logger ?? console;
     this.timeout = opts?.requestTimeout ?? 5000;
     this.totalTimeout = opts?.totalRequestTimeout ?? 10000;
+    this.healthCheckInterval = opts?.healthCheckInterval ?? 10000;
 
     switch (opts?.loadBalancerStrategy ?? "random") {
       case "round-robin":
@@ -112,6 +125,8 @@ class ApiGateway {
     }
 
     this.retryStrategy = new RetryStrategy(opts?.retryStrategy);
+
+    process.once("SIGTERM", () => clearTimeout(this.healthCheckTimeout));
 
     this.log.info("Starting api gateway");
   }
@@ -141,13 +156,20 @@ class ApiGateway {
 
       const { serviceId, token } = data;
 
-      this.isReady = true;
+      this.status = "GATEWAY_ACTIVE";
+      this.port = port;
       this.registryHeaders = {
         "x-service-id": serviceId,
         "x-service-token": token,
       };
 
       this.log.debug("Api Gateway Registered");
+
+      // Start health checks
+      this.healthCheckTimeout = setTimeout(
+        () => this.checkRegistryHealth(),
+        this.healthCheckInterval,
+      );
       return true;
     } catch (error) {
       this.log.error("Error connecting to service registry -", error);
@@ -162,13 +184,18 @@ class ApiGateway {
     remaining: string,
   ) {
     try {
-      // Gateway hasn't finished registering yet
-      if (!this.isReady) {
-        throw new ApiGatewayError(
-          503,
-          "GATEWAY_STARTING",
-          "Gateway is starting. Please try again shortly",
-        );
+      // Gateway hasn't finished registering yet, health check fail, shutting down
+      if (this.status !== "GATEWAY_ACTIVE") {
+        const message =
+          this.status === "ATTEMPTING_REREGISTRATION"
+            ? "Attempting to re-register with service registry. Check back shortly"
+            : this.status === "REGISTRY_HEALTH_CHECK_FAIL"
+              ? "Health check on service registry failed, attempting retry. Check back shortly"
+              : this.status === "SHUTTING_DOWN"
+                ? "Gateway has encountered an error and is shutting down"
+                : "Gateway is starting";
+
+        throw new ApiGatewayError(503, this.status, message);
       }
 
       const instances = await this.getServices(serviceName);
@@ -336,6 +363,103 @@ class ApiGateway {
     );
 
     res.status(status).json(response);
+  }
+
+  /* HEALTH CHECKs */
+
+  async checkRegistryHealth() {
+    let attempts = 0;
+    const url = new URL("/health", this.registryUrl).toString();
+
+    this.log.debug("Attempting new health check for service registry");
+
+    while (true) {
+      try {
+        const { data } = await axios.get<HealthCheckResponse>(url, {
+          headers: this.registryHeaders,
+          timeout: this.timeout,
+        });
+
+        if (data.data?.status === "UP") {
+          this.log.debug("Registry up");
+          this.status = "GATEWAY_ACTIVE";
+        } else {
+          this.log.error("Registry down");
+          this.status = "REGISTRY_HEALTH_CHECK_FAIL";
+        }
+      } catch (error) {
+        this.log.error("Failed to confirm registry status");
+        this.status = "REGISTRY_HEALTH_CHECK_FAIL";
+
+        if (error instanceof AxiosError) {
+          // Indicates the service registry no longer considers us authenticated so we must re-register
+          if (error.response && error.response.status === 401) {
+            this.log.warn(
+              "Unauthenticated response from registry. Attempting re-registration...",
+            );
+            this.status = "ATTEMPTING_REREGISTRATION";
+            // Timeout
+          } else if (error.code === "ECONNABORTED") {
+            this.log.warn("Connection timed out");
+          } else {
+            this.log.error(
+              "FATAL ERROR: Unhandled axios error Status - ",
+              error.status,
+              ", Code - ",
+              error.code,
+              ", Message - ",
+              error.message,
+            );
+            this.status = "SHUTTING_DOWN";
+          }
+        } else {
+          this.log.error("FATAL ERROR: Unhandled Health Check Error -", error);
+          this.status = "SHUTTING_DOWN";
+        }
+      } finally {
+        if (this.status === "GATEWAY_ACTIVE") {
+          this.healthCheckTimeout = setTimeout(
+            () => this.checkRegistryHealth(),
+            this.healthCheckInterval,
+          );
+          break;
+        } else if (this.status === "ATTEMPTING_REREGISTRATION") {
+          return this.attemptReregister();
+        } else if (attempts >= 3 || this.status === "SHUTTING_DOWN") {
+          this.status = "SHUTTING_DOWN";
+          this.log.error(
+            "Could not connect to service registry. Shutting down...",
+          );
+          process.emit("SIGTERM");
+          break;
+        }
+
+        attempts++;
+      }
+    }
+  }
+
+  private async attemptReregister() {
+    let attempts = 0;
+
+    while (true) {
+      // Since we already registered successfully once, we should definitely have a port number and reg key
+      const registered = await this.register(this.port as number);
+
+      if (registered) {
+        this.status = "GATEWAY_ACTIVE";
+        return;
+      }
+
+      if (attempts >= 3) {
+        this.log.error(
+          "FATAL ERROR: Could not re-register with service registry. Shutting down...",
+        );
+        this.status = "SHUTTING_DOWN";
+        process.emit("SIGTERM");
+        return;
+      }
+    }
   }
 }
 
