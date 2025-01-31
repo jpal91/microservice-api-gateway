@@ -29,6 +29,8 @@ interface RegistryHeaders {
 }
 
 interface ApiGatewayOpts {
+  requestTimeout?: number;
+  totalRequestTimeout?: number;
   registryUrl?: string | URL;
   loadBalancerStrategy?: "round-robin" | "random";
   logger?: Logger;
@@ -59,6 +61,8 @@ class ApiGateway {
   private registryUrl: string;
   private isReady = false;
 
+  timeout: number;
+  totalTimeout: number;
   retryStrategy: RetryStrategy;
   client: AxiosStatic = axios;
   registryHeaders: RegistryHeaders | undefined;
@@ -71,6 +75,8 @@ class ApiGateway {
       process.env.REGISTRY_URL ??
       "http://localhost:3002";
     this.log = opts?.logger ?? console;
+    this.timeout = opts?.requestTimeout ?? 5000;
+    this.totalTimeout = opts?.totalRequestTimeout ?? 10000;
 
     switch (opts?.loadBalancerStrategy ?? "random") {
       case "round-robin":
@@ -147,13 +153,14 @@ class ApiGateway {
         targetUrl,
       );
 
-      return this.handleServiceRequest(req, res, targetUrl);
+      return this.getServiceResponse(req, res, targetUrl);
     } catch (e) {
       return this.handleErrResponse(res, e);
     }
   }
 
-  async handleServiceRequest(req: Request, res: Response, url: string) {
+  async getServiceResponse(req: Request, res: Response, url: string) {
+    const startTime = Date.now();
     let attempt = 0;
 
     // Attempts to fufill the request using the configured retry strategy
@@ -164,12 +171,21 @@ class ApiGateway {
           url,
           headers: req.headers,
           data: req.body,
+          timeout: this.timeout,
         });
 
         return this.handleSuccessResponse(res, status, data.data, headers);
       } catch (error) {
         if (!this.retryStrategy.shouldRetry(error, attempt)) {
           return this.handleErrResponse(res, error);
+        }
+
+        if (Date.now() - startTime >= this.totalTimeout) {
+          throw new ApiGatewayError(
+            504,
+            "GATEWAY_TIMEOUT",
+            "Request timed out",
+          );
         }
       }
 

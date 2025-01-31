@@ -32,7 +32,10 @@ class RetryStrategy {
    * @param attempt - The number of attempts made on this request
    */
   shouldRetry(err: AxiosError | unknown, attempt: number) {
-    if (err instanceof AxiosError && err.response) {
+    // Request timeout, go ahead and try again until max is hit
+    if (err instanceof AxiosError && err?.code === "ECONNABORTED") {
+      return attempt < this.maxRetries;
+    } else if (err instanceof AxiosError && err.response) {
       return (
         attempt < this.maxRetries &&
         this.retryableStatus.has(err.response.status)
