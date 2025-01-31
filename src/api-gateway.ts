@@ -33,7 +33,9 @@ interface RegistryHeaders {
 interface ApiGatewayOpts {
   requestTimeout?: number;
   totalRequestTimeout?: number;
+  healthChecks?: boolean;
   healthCheckInterval?: number;
+  healthCheckFailStrategy?: "try-again" | "shutdown";
   registryUrl?: string | URL;
   loadBalancerStrategy?: "round-robin" | "random";
   logger?: Logger;
@@ -115,12 +117,14 @@ export class ApiGatewayError extends Error {
 
 class ApiGateway {
   private registryUrl: string;
-  private status: ApiGatewayStatus = "GATEWAY_STARTING";
   private port: number | undefined;
-  private healthCheckTimeout: NodeJS.Timeout | undefined;
 
+  status: ApiGatewayStatus = "GATEWAY_STARTING";
   timeout: number;
+  healthChecks: boolean;
   healthCheckInterval: number;
+  healthCheckTimeout: NodeJS.Timeout | undefined;
+  healthCheckFailStrategy: "try-again" | "shutdown";
   totalTimeout: number;
   retryStrategy: RetryStrategy;
   client: AxiosStatic = axios;
@@ -129,14 +133,15 @@ class ApiGateway {
   loadBalancer: RoundRobinBalancer | RandomBalancer;
 
   constructor(opts?: ApiGatewayOpts) {
-    this.registryUrl =
-      String(opts?.registryUrl) ??
-      process.env.REGISTRY_URL ??
-      "http://localhost:3002";
+    this.registryUrl = opts?.registryUrl
+      ? opts.registryUrl.toString()
+      : (process.env.REGISTRY_URL ?? "http://localhost:3002");
     this.log = opts?.logger ?? console;
     this.timeout = opts?.requestTimeout ?? 5000;
     this.totalTimeout = opts?.totalRequestTimeout ?? 10000;
+    this.healthChecks = opts?.healthChecks ?? true;
     this.healthCheckInterval = opts?.healthCheckInterval ?? 10000;
+    this.healthCheckFailStrategy = opts?.healthCheckFailStrategy ?? "try-again";
 
     switch (opts?.loadBalancerStrategy ?? "random") {
       case "round-robin":
@@ -161,11 +166,17 @@ class ApiGateway {
 
     this.log.debug("Obtaining initial registration");
 
-    const url = new URL("/service", this.registryUrl);
+    let url: string;
+
+    try {
+      url = new URL("/service", this.registryUrl).toString();
+    } catch {
+      throw new Error("Invalid registryUrl value: " + this.registryUrl);
+    }
 
     try {
       const { data } = await axios.post<RegistrationResponse>(
-        url.toString(),
+        url,
         {
           port,
           serviceType: "api-gateway",
@@ -188,11 +199,14 @@ class ApiGateway {
 
       this.log.debug("Api Gateway Registered");
 
-      // Start health checks
-      this.healthCheckTimeout = setTimeout(
-        () => this.checkRegistryHealth(),
-        this.healthCheckInterval,
-      );
+      if (this.healthChecks) {
+        // Start health checks
+        this.healthCheckTimeout = setTimeout(
+          () => this.checkRegistryHealth(),
+          this.healthCheckInterval,
+        );
+      }
+
       return true;
     } catch (error) {
       this.log.error("Error connecting to service registry -", error);
@@ -383,7 +397,13 @@ class ApiGateway {
 
   async checkRegistryHealth() {
     let attempts = 0;
-    const url = new URL("/health", this.registryUrl).toString();
+    let url: string;
+
+    try {
+      url = new URL("/service", this.registryUrl).toString();
+    } catch {
+      throw new Error("Invalid registryUrl value: " + this.registryUrl);
+    }
 
     this.log.debug("Attempting new health check for service registry");
 
@@ -393,6 +413,8 @@ class ApiGateway {
           headers: this.registryHeaders,
           timeout: this.timeout,
         });
+
+        this.log.debug(data);
 
         if (data.data?.status === "UP") {
           this.log.debug("Registry up");
@@ -420,42 +442,66 @@ class ApiGateway {
             // Unhandled
           } else {
             this.log.error(
-              "FATAL ERROR: Unhandled axios error Status - ",
+              "Unhandled axios error Status - ",
               error.status,
               ", Code - ",
               error.code,
               ", Message - ",
               error.message,
             );
-            this.status = "SHUTTING_DOWN";
           }
 
           // Some other non-axios unhandled
         } else {
-          this.log.error("FATAL ERROR: Unhandled Health Check Error -", error);
-          this.status = "SHUTTING_DOWN";
+          this.log.error("Unhandled Health Check Error -", error);
         }
       } finally {
         // Everything's good, start healthcheck timer
         if (this.status === "GATEWAY_ACTIVE") {
-          this.healthCheckTimeout = setTimeout(
-            () => this.checkRegistryHealth(),
-            this.healthCheckInterval,
-          );
+          if (this.healthChecks) {
+            this.healthCheckTimeout = setTimeout(
+              () => this.checkRegistryHealth(),
+              this.healthCheckInterval,
+            );
+          }
           break;
+
+          // Registry responded but is down. Wait a short period and try again
+        } else if (
+          this.status === "REGISTRY_HEALTH_CHECK_FAIL" &&
+          attempts < 3
+        ) {
+          await this.retryStrategy.delay(attempts);
 
           // We need to re-register with service registry
         } else if (this.status === "ATTEMPTING_REREGISTRATION") {
           return this.attemptReregister();
 
-          // We have gone over attempts or some unhandled error happened
-        } else if (attempts >= 3 || this.status === "SHUTTING_DOWN") {
-          this.status = "SHUTTING_DOWN";
-          this.log.error(
-            "Could not connect to service registry. Shutting down...",
-          );
-          process.emit("SIGTERM");
+          // We've gone over our attempts
+        } else if (attempts >= 3) {
+          if (this.healthCheckFailStrategy === "shutdown") {
+            this.status = "SHUTTING_DOWN";
+            this.log.error(
+              "Could not connect to service registry. Shutting down...",
+            );
+            process.emit("SIGTERM");
+          } else {
+            this.status = "REGISTRY_HEALTH_CHECK_FAIL";
+            this.log.error(
+              "Did not receive 'UP' status from registry after 3 attempts. Trying again later",
+            );
+            if (this.healthChecks) {
+              this.healthCheckTimeout = setTimeout(
+                () => this.checkRegistryHealth(),
+                this.healthCheckInterval,
+              );
+            }
+          }
           break;
+
+          // Sanity check
+        } else {
+          throw new Error("unreachable");
         }
 
         attempts++;
@@ -475,6 +521,7 @@ class ApiGateway {
         return;
       }
 
+      // Theoretically shouldn't happen since we already successfully registered once before
       if (attempts >= 3) {
         this.log.error(
           "FATAL ERROR: Could not re-register with service registry. Shutting down...",
@@ -485,6 +532,7 @@ class ApiGateway {
       }
 
       attempts++;
+      await this.retryStrategy.delay(attempts);
     }
   }
 }
