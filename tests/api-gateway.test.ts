@@ -196,7 +196,7 @@ describe("Api Gateway", () => {
         timestamp: expect.any(Number),
         error: {
           code: "GATEWAY_STARTING",
-          message: "Gateway is starting. Please try again shortly",
+          message: "Gateway is starting. Please check back shortly",
         },
       });
     });
