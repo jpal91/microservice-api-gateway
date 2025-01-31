@@ -18,12 +18,6 @@ import RetryStrategy, { type RetryStrategyOptions } from "./retry";
 import { RoundRobinBalancer, RandomBalancer } from "./load-balancer";
 import { IncomingHttpHeaders } from "node:http2";
 
-interface ProxyResponse {
-  data: ApiResponse;
-  status: number;
-  headers?: RawAxiosResponseHeaders;
-}
-
 interface RegistryHeaders {
   "x-service-id": string;
   "x-service-token": string;
@@ -258,7 +252,9 @@ class ApiGateway {
 
       const instances = await this.getServices(serviceName);
 
+      // TODO: circuit breaker?
       const service = this.loadBalancer.selectInstance(instances);
+      // TODO: http
       const targetUrl = `https://${service.host}:${service.port}/${remaining}`;
 
       this.log.debug(
@@ -423,7 +419,7 @@ class ApiGateway {
     res.status(status).json(response);
   }
 
-  /* HEALTH CHECKs */
+  /* HEALTH CHECKS */
 
   async checkRegistryHealth() {
     let attempts = 0;
