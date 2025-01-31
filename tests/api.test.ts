@@ -61,7 +61,10 @@ describe("routes", () => {
 
     process.env.SERVICE_REGISTRATION_KEY = "abc123";
 
-    apiGateway = new ApiGateway({ retryStrategy: { maxRetries: 0 } });
+    apiGateway = new ApiGateway({
+      retryStrategy: { maxRetries: 0 },
+      healthChecks: false,
+    });
     return apiGateway.register(3001).then(() => {
       app = createApi(apiGateway);
     });
@@ -77,6 +80,7 @@ describe("routes", () => {
       ...genericSuccess,
       headers: {
         "x-test-key": "1234",
+        "keep-alive": "timeout=5, max=200",
       },
     };
 
@@ -90,6 +94,7 @@ describe("routes", () => {
         expect(res.body.success).toBe(true);
         expect(res.body.data.message).toBe("success");
         expect(res.headers["x-test-key"]).toBe("1234");
+        expect(res.headers["keep-alive"]).toBeUndefined();
       });
 
     mockAxios.get.mockResolvedValueOnce(genericInstanceResponse);

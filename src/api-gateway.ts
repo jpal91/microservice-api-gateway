@@ -51,23 +51,53 @@ type ApiGatewayStatus =
   | "SHUTTING_DOWN"
   | "ATTEMPTING_REREGISTRATION";
 
-const EXCLUDED_HEADERS = new Set([
+const EXCLUDED_REQUEST_HEADERS = new Set([
   "host",
   "connection",
   "content-length",
   "transfer-encoding",
-  "authorization", // if you handle auth at the gateway level
+  "authorization",
+]);
+
+const EXCLUDED_RESPONSE_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "x-internal-", // Any custom internal headers
 ]);
 
 /**
  * Fitlers out headers that we don't want to pass to the requested service
  * @param headers
  */
-const filterHeaders = (headers?: IncomingHttpHeaders) => {
+const filterRequestHeaders = (headers?: IncomingHttpHeaders) => {
   const filtered: Headers = {};
   Object.entries(headers ?? {}).forEach(([k, v]) => {
-    if (!EXCLUDED_HEADERS.has(k.toLowerCase())) {
+    if (!EXCLUDED_REQUEST_HEADERS.has(k.toLowerCase())) {
       filtered[k] = v;
+    }
+  });
+
+  return filtered;
+};
+
+const filterResponseHeaders = (
+  headers?: RawAxiosResponseHeaders | AxiosResponseHeaders,
+) => {
+  const filtered: Headers = {};
+
+  Object.entries(headers ?? {}).forEach(([key, value]) => {
+    // Skip internal headers or excluded ones
+    if (
+      !key.toLowerCase().startsWith("x-internal-") &&
+      !EXCLUDED_RESPONSE_HEADERS.has(key.toLowerCase())
+    ) {
+      filtered[key] = value as string | string[] | undefined;
     }
   });
 
@@ -247,7 +277,7 @@ class ApiGateway {
   async getServiceResponse(req: Request, res: Response, url: string) {
     const startTime = Date.now();
     let attempt = 0;
-    const filteredHeaders = filterHeaders(req.headers);
+    const filteredHeaders = filterRequestHeaders(req.headers);
 
     // Attempts to fufill the request using the configured retry strategy
     while (true) {
@@ -298,7 +328,7 @@ class ApiGateway {
     res: Response,
     status: number,
     data?: T,
-    headers?: any,
+    headers?: RawAxiosResponseHeaders | AxiosResponseHeaders,
   ) {
     const response: ApiResponse<T> = {
       success: true,
@@ -306,7 +336,7 @@ class ApiGateway {
       data,
     };
 
-    res.set(headers);
+    res.set(filterResponseHeaders(headers));
 
     this.log.debug("Success Res - Status: ", status, "Res: ", response);
     res.status(status).json(response);
