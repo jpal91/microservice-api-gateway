@@ -88,6 +88,29 @@ export class ApiGatewayError extends Error {
     this.code = code;
     this.data = data;
   }
+
+  static fromStatus(status: ApiGatewayStatus) {
+    let message: string;
+
+    switch (status) {
+      case "ATTEMPTING_REREGISTRATION":
+        message =
+          "Attempting to re-register with service registry. Check back shortly";
+        break;
+      case "REGISTRY_HEALTH_CHECK_FAIL":
+        message =
+          "Health check on service registry failed, attempting retry. Check back shortly";
+        break;
+      case "SHUTTING_DOWN":
+        message = "Gateway has encountered an error and is shutting down";
+        break;
+      default:
+        message = "Gateway is starting. Please check back shortly";
+        break;
+    }
+
+    return new ApiGatewayError(503, status, message);
+  }
 }
 
 class ApiGateway {
@@ -186,16 +209,7 @@ class ApiGateway {
     try {
       // Gateway hasn't finished registering yet, health check fail, shutting down
       if (this.status !== "GATEWAY_ACTIVE") {
-        const message =
-          this.status === "ATTEMPTING_REREGISTRATION"
-            ? "Attempting to re-register with service registry. Check back shortly"
-            : this.status === "REGISTRY_HEALTH_CHECK_FAIL"
-              ? "Health check on service registry failed, attempting retry. Check back shortly"
-              : this.status === "SHUTTING_DOWN"
-                ? "Gateway has encountered an error and is shutting down"
-                : "Gateway is starting";
-
-        throw new ApiGatewayError(503, this.status, message);
+        throw ApiGatewayError.fromStatus(this.status);
       }
 
       const instances = await this.getServices(serviceName);
@@ -398,9 +412,12 @@ class ApiGateway {
               "Unauthenticated response from registry. Attempting re-registration...",
             );
             this.status = "ATTEMPTING_REREGISTRATION";
+
             // Timeout
           } else if (error.code === "ECONNABORTED") {
             this.log.warn("Connection timed out");
+
+            // Unhandled
           } else {
             this.log.error(
               "FATAL ERROR: Unhandled axios error Status - ",
@@ -412,19 +429,26 @@ class ApiGateway {
             );
             this.status = "SHUTTING_DOWN";
           }
+
+          // Some other non-axios unhandled
         } else {
           this.log.error("FATAL ERROR: Unhandled Health Check Error -", error);
           this.status = "SHUTTING_DOWN";
         }
       } finally {
+        // Everything's good, start healthcheck timer
         if (this.status === "GATEWAY_ACTIVE") {
           this.healthCheckTimeout = setTimeout(
             () => this.checkRegistryHealth(),
             this.healthCheckInterval,
           );
           break;
+
+          // We need to re-register with service registry
         } else if (this.status === "ATTEMPTING_REREGISTRATION") {
           return this.attemptReregister();
+
+          // We have gone over attempts or some unhandled error happened
         } else if (attempts >= 3 || this.status === "SHUTTING_DOWN") {
           this.status = "SHUTTING_DOWN";
           this.log.error(
@@ -459,6 +483,8 @@ class ApiGateway {
         process.emit("SIGTERM");
         return;
       }
+
+      attempts++;
     }
   }
 }
