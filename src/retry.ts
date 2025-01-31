@@ -57,7 +57,7 @@ class RetryStrategy {
       this.maxDelay,
       this.baseDelay * Math.pow(2, attempt),
     );
-    const jitter = Math.random() * 10;
+    const jitter = exponentialDelay * (0.1 + Math.random() * 0.2);
 
     await new Promise((resolve) => {
       setTimeout(resolve, exponentialDelay + jitter);
