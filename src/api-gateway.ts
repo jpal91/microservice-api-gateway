@@ -15,6 +15,7 @@ import type {
 } from "microservice-ecommerce";
 import RetryStrategy, { type RetryStrategyOptions } from "./retry";
 import { RoundRobinBalancer, RandomBalancer } from "./load-balancer";
+import { IncomingHttpHeaders } from "node:http2";
 
 interface ProxyResponse {
   data: ApiResponse;
@@ -37,7 +38,30 @@ interface ApiGatewayOpts {
   retryStrategy?: RetryStrategyOptions;
 }
 
-type Headers = { [key: string]: string };
+type Headers = { [key: string]: string | string[] | undefined };
+
+const EXCLUDED_HEADERS = new Set([
+  "host",
+  "connection",
+  "content-length",
+  "transfer-encoding",
+  "authorization", // if you handle auth at the gateway level
+]);
+
+/**
+ * Fitlers out headers that we don't want to pass to the requested service
+ * @param headers
+ */
+const filterHeaders = (headers?: IncomingHttpHeaders) => {
+  const filtered: Headers = {};
+  Object.entries(headers ?? {}).forEach(([k, v]) => {
+    if (!EXCLUDED_HEADERS.has(k.toLowerCase())) {
+      filtered[k] = v;
+    }
+  });
+
+  return filtered;
+};
 
 export class ApiGatewayError extends Error {
   status: number;
@@ -162,6 +186,7 @@ class ApiGateway {
   async getServiceResponse(req: Request, res: Response, url: string) {
     const startTime = Date.now();
     let attempt = 0;
+    const filteredHeaders = filterHeaders(req.headers);
 
     // Attempts to fufill the request using the configured retry strategy
     while (true) {
@@ -169,7 +194,7 @@ class ApiGateway {
         const { data, status, headers } = await axios.request<ApiResponse>({
           method: req.method,
           url,
-          headers: req.headers,
+          headers: filteredHeaders,
           data: req.body,
           timeout: this.timeout,
         });
