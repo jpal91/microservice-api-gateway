@@ -125,28 +125,34 @@ class ApiGateway {
 
     const url = new URL("/service", this.registryUrl);
 
-    const { data } = await axios.post<RegistrationResponse>(
-      url.toString(),
-      {
-        port,
-        serviceType: "api-gateway",
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.SERVICE_REGISTRATION_KEY}`,
+    try {
+      const { data } = await axios.post<RegistrationResponse>(
+        url.toString(),
+        {
+          port,
+          serviceType: "api-gateway",
         },
-      },
-    );
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.SERVICE_REGISTRATION_KEY}`,
+          },
+        },
+      );
 
-    const { serviceId, token } = data;
+      const { serviceId, token } = data;
 
-    this.isReady = true;
-    this.registryHeaders = {
-      "x-service-id": serviceId,
-      "x-service-token": token,
-    };
+      this.isReady = true;
+      this.registryHeaders = {
+        "x-service-id": serviceId,
+        "x-service-token": token,
+      };
 
-    this.log.debug("Api Gateway Registered");
+      this.log.debug("Api Gateway Registered");
+      return true;
+    } catch (error) {
+      this.log.error("Error connecting to service registry -", error);
+      return false;
+    }
   }
 
   async handleRequest(
@@ -201,10 +207,12 @@ class ApiGateway {
 
         return this.handleSuccessResponse(res, status, data.data, headers);
       } catch (error) {
+        // Check if we should retry and return error if not
         if (!this.retryStrategy.shouldRetry(error, attempt)) {
           return this.handleErrResponse(res, error);
         }
 
+        // If we have maxed out our timeout, stop and throw an error instead.
         if (Date.now() - startTime >= this.totalTimeout) {
           throw new ApiGatewayError(
             504,
